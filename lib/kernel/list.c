@@ -421,7 +421,7 @@ list_sort (struct list *list, list_less_func *less, void *aux)
       for (a0 = list_begin (list); a0 != list_end (list); a0 = b1)
         {
           /* Each iteration produces one output run. */
-          output_run_cnt++;
+          output_run_cnt++;´Ó
 
           /* Locate two adjacent runs of nondecreasing elements
              A0...A1B0 and A1B0...B1. */
