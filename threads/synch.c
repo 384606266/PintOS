@@ -218,6 +218,7 @@ lock_acquire (struct lock *lock)
 
   enum intr_level old_level = intr_disable();
 
+  current_thread = thread_current();
   current_thread->lock_waiting = NULL;
   lock->max_priority = current_thread->priority;
   list_insert_ordered(&current_thread->locks, &lock->elem, lock_prioty_cmp, NULL);
