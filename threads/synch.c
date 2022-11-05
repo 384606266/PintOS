@@ -121,6 +121,7 @@ sema_up (struct semaphore *sema)
           struct thread, elem));
   }
   sema->value++;
+  thread_yield();
   intr_set_level (old_level);
 }
 
@@ -301,7 +302,7 @@ void thread_remove_lock(struct lock* lock) {
     enum intr_level old_level = intr_disable();
     list_remove(&lock->elem);
     thread_priority_update(thread_current());
-    thread_yield();
+    //thread_yield();
     intr_set_level(old_level);
 }
 
