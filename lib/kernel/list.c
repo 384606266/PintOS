@@ -425,7 +425,7 @@ list_sort (struct list *list, list_less_func *less, void *aux)
 
           /* Locate two adjacent runs of nondecreasing elements
              A0...A1B0 and A1B0...B1. */
-          a1b0 = find_end_of_run (a0, list_end (list), less, au
+          a1b0 = find_end_of_run(a0, list_end(list), less, aux);
           if (a1b0 == list_end (list))
             break;
           b1 = find_end_of_run (a1b0, list_end (list), less, aux);
