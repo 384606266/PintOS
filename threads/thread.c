@@ -381,7 +381,7 @@ thread_set_priority (int new_priority)
       current_thread->priority = new_priority;
       thread_yield();
   }
-  enum intr_level old_level = intr_disable();
+  intr_set_level(old_level);
 }
 
 /* Returns the current thread's priority. */
