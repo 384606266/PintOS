@@ -55,6 +55,9 @@ static long long user_ticks;    /* # of timer ticks in user programs. */
 #define TIME_SLICE 4            /* # of timer ticks to give each thread. */
 static unsigned thread_ticks;   /* # of timer ticks since last yield. */
 
+/*the average number of threads ready to run over the past minute*/
+static fixed_point load_avg;
+
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
@@ -101,11 +104,15 @@ thread_init (void)
   initial_thread->tid = allocate_tid ();
 }
 
+
+bool schedule_started = false;
 /* Starts preemptive thread scheduling by enabling interrupts.
    Also creates the idle thread. */
 void
 thread_start (void) 
 {
+    load_avg = CONVERT_TO_FIX(0);
+    schedule_started = true;
   /* Create the idle thread. */
   struct semaphore idle_started;
   sema_init (&idle_started, 0);
@@ -262,7 +269,6 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  //list_push_back (&ready_list, &t->elem);
   list_insert_ordered(&ready_list, &t->elem, (list_less_func*) &prio_a_less_b, NULL);
   t->status = THREAD_READY;
   intr_set_level (old_level);
@@ -337,6 +343,8 @@ thread_exit (void)
 void
 thread_yield (void) 
 {
+    if (schedule_started == false)
+        return;
   struct thread *cur = thread_current ();
   enum intr_level old_level;
   
@@ -344,7 +352,6 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread)
-      //list_push_back (&ready_list, &cur->elem);
       list_insert_ordered(&ready_list, &cur->elem, (list_less_func*) &prio_a_less_b, NULL);
   cur->status = THREAD_READY;
   schedule ();
@@ -373,6 +380,9 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
+    if (thread_mlfqs)
+        return;
+
   struct thread* current_thread = thread_current();
 
   enum intr_level old_level = intr_disable();
@@ -395,32 +405,77 @@ thread_get_priority (void)
 void
 thread_set_nice (int nice UNUSED) 
 {
-  /* Not yet implemented. */
+    struct thread* t = thread_current();
+    t->nice = nice;
+    mlfqs_update_thread_priority(t);
+    thread_yield();
 }
 
 /* Returns the current thread's nice value. */
 int
 thread_get_nice (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+    struct thread* t = thread_current();
+    return t->nice;
 }
 
 /* Returns 100 times the system load average. */
 int
 thread_get_load_avg (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return CONVERT_TO_FLOAT_ROUND(MUL_FP_INT(load_avg, 100));
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+    return CONVERT_TO_FLOAT_ROUND(MUL_FP_INT(thread_current()->recent_cpu,100));
 }
+
+void mlfqs_increase_recent_cpu(void) {
+    ASSERT(thread_mlfqs);
+    ASSERT(intr_context());
+    struct thread* current_thread = thread_current();
+    if (current_thread != idle_thread) {
+        current_thread->recent_cpu = ADD_FP_INT(current_thread->recent_cpu, 1);
+    }
+    return;
+}
+
+void mlfqs_update_load_avg_and_recent_cpu(void) {
+    ASSERT(thread_mlfqs);
+    ASSERT(intr_context());
+
+    size_t ready_threads = list_size(&ready_list);
+    if (thread_current() != idle_thread)
+        ready_threads++;
+    load_avg = ADD_FP(DIV_FP_INT(MUL_FP_INT(load_avg, 59), 60), DIV_FP_INT(CONVERT_TO_FIX(ready_threads), 60));
+
+    struct thread* t;
+    struct list_elem* e = list_begin(&all_list);
+    for (; e != list_end(&all_list); e = list_next(e)) {
+        t = list_entry(e, struct thread, allelem);
+        if (t != idle_thread) {
+            t->recent_cpu = ADD_FP_INT(MUL_FP(DIV_FP(MUL_FP_INT(load_avg, 2), ADD_FP_INT(MUL_FP_INT(load_avg, 2), 1)), t->recent_cpu), t->nice);
+            mlfqs_update_thread_priority(t);
+        }
+    }
+}
+
+void mlfqs_update_thread_priority(struct thread* t) {
+    if (t == idle_thread)
+        return;
+
+    ASSERT(thread_mlfqs);
+    ASSERT(t != idle_thread);
+
+    t->priority = PRI_MAX - CONVERT_TO_FLOAT(DIV_FP_INT(t->recent_cpu, 4)) - t->nice * 2;
+    t->priority = (t->priority > PRI_MAX) ? PRI_MAX : t->priority;
+    t->priority = (t->priority < PRI_MIN) ? PRI_MIN : t->priority;
+}
+
+
 
 /* Idle thread.  Executes when no other thread is ready to run.
 
