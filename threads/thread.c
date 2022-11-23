@@ -205,6 +205,20 @@ thread_create (const char *name, int priority,
   tid = t->tid = allocate_tid ();
   t->block_ticks = 0;
 
+  
+
+  /*initialize the child_info*/
+  t->child_entry = malloc(sizeof(struct child_info));
+  t->child_entry->tid = tid;
+  t->child_entry->t = t;
+  t->child_entry->exit_code = 0;
+  t->child_entry->is_alive = true;
+  t->child_entry->is_waiting = false;
+  sema_init(&t->child_entry->semaphore, 0);
+
+  t->parent = thread_current();
+  list_push_back(&t->parent->children, &t->child_entry->elem);
+
   /* Prepare thread for first run by initializing its stack.
      Do this atomically so intermediate values for the 'stack' 
      member cannot be observed. */
@@ -327,6 +341,19 @@ thread_exit (void)
 #ifdef USERPROG
   process_exit ();
 #endif
+
+  struct thread *cur = thread_current();
+  struct list_elem *e;
+  struct file_info *entry;
+  while(!list_empty(&cur->file_list))
+  {
+    e = list_pop_front(&cur->file_list);
+    entry = list_entry(e,struct file_info, elem);
+    sema_down(&sema_filesys);
+    file_close(entry->file);
+    sema_up(&sema_filesys);
+    free(entry);
+  }
 
   /* Remove thread from all threads list, set our status to dying,
      and schedule another process.  That process will destroy us
@@ -557,6 +584,11 @@ init_thread (struct thread *t, const char *name, int priority)
   ASSERT (name != NULL);
 
   memset (t, 0, sizeof *t);
+
+  t->exit_code = 0;
+  sema_init(&t->wait_success,0);
+  t->exec_success = false;
+
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
@@ -564,6 +596,10 @@ init_thread (struct thread *t, const char *name, int priority)
   t->original_priority = priority;
   t->lock_waiting = NULL;
   list_init(&t->locks);
+  list_init(&t->children);
+  list_init(&t->file_list);
+  t->next_fd = 2;
+  t->exec_file = NULL;
   t->magic = THREAD_MAGIC;
   list_push_back (&all_list, &t->allelem);
   //list_insert_ordered(&all_list, &t->allelem, (list_less_func*) &prio_a_less_b, NULL);

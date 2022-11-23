@@ -26,46 +26,137 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *file_name) 
+process_execute (const char *cmd_line) 
 {
-  char *fn_copy;
+  char *fn_copy1,*fn_copy2;
   tid_t tid;
 
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
-  fn_copy = palloc_get_page (0);
-  if (fn_copy == NULL)
+  fn_copy1 = palloc_get_page (0);
+  fn_copy2 = palloc_get_page (0);
+  if (fn_copy1 == NULL||fn_copy2 == NULL)
     return TID_ERROR;
-  strlcpy (fn_copy, file_name, PGSIZE);
+  strlcpy (fn_copy1, cmd_line, PGSIZE);
+  strlcpy (fn_copy2, cmd_line, PGSIZE);
+
+  char *save_ptr;
+  char *prog_name = strtok_r (fn_copy1, " ", &save_ptr);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (prog_name, PRI_DEFAULT, start_process, fn_copy2);
+
+  palloc_free_page(fn_copy1);
+
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+    palloc_free_page (fn_copy2); 
+  else{
+    sema_down(&thread_current()->wait_success);
+    if(!thread_current()->exec_success){
+      return -1;
+    }
+    /*reset the bool, for next spawn*/
+    thread_current()->exec_success = false;
+  }
   return tid;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+start_process (void *cmd_line_)
 {
-  char *file_name = file_name_;
+  char *cmd_line = cmd_line_;
   struct intr_frame if_;
   bool success;
+
+  char *cmd_line_copy = palloc_get_page (0);
+  if(cmd_line_copy==NULL)
+    return;
+  strlcpy (cmd_line_copy, cmd_line, PGSIZE);
+
+  char *token, *save_ptr;
+  char *prog_name = strtok_r (cmd_line, " ", &save_ptr);
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+
+  /*load func have many operation that calls filesys*/
+  sema_down(&sema_filesys);
+  success = load (prog_name, &if_.eip, &if_.esp);
+  sema_up(&sema_filesys);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
+  // palloc_free_page (cmd_line_);
+  if (!success) {
+    palloc_free_page (cmd_line_copy);
+    thread_current()->child_entry->is_alive = false;
+    thread_current()->exit_code = -1;
+    sema_up(&thread_current()->parent->wait_success);
     thread_exit ();
+  }
 
+  if_.esp = PHYS_BASE;
+  int argc = 0;
+  void *argv[128];
+  size_t arg_len;
+
+  /*
+  Push the arg string in the stack and save the address
+  note that name is also an arg.
+  */
+  for (token = strtok_r (cmd_line_copy, " ", &save_ptr); token != NULL;token = strtok_r (NULL, " ", &save_ptr)){
+    arg_len = strlen(token)+1;
+    if_.esp -= arg_len;
+    memcpy(if_.esp, token, arg_len);
+    argv[argc++] = if_.esp;
+  }
+  
+  /*round the stack pointer down to a multiple of 4 before the first push.*/
+  uintptr_t tmp = ((uintptr_t)if_.esp);
+  if (tmp%4!=0)
+    tmp-= tmp%4;
+  if_.esp = (void*)tmp;
+  
+  /*push null pointer sentinel*/
+  size_t ptr_size = sizeof(void*);
+  if_.esp-= ptr_size;
+  memset(if_.esp,0,ptr_size);
+  /*push the address of the args*/
+  for(int i=argc-1;i>=0;i--){
+    if_.esp -= ptr_size;
+    memcpy(if_.esp, &argv[i],ptr_size);
+  }
+  /*push argv (the address of argv[0]) and argc*/
+  if_.esp -= ptr_size;
+  *(uintptr_t *)if_.esp = (uintptr_t)if_.esp + ptr_size;
+  if_.esp -= ptr_size;
+  *(int *)if_.esp = argc;
+
+  /*push a fake return address*/
+  if_.esp -= ptr_size;
+  memset(if_.esp, 0, ptr_size);
+
+  /*for test*/
+  // printf("STACK SET. ESP: %p\n", if_.esp);
+  // hex_dump((uintptr_t)if_.esp, if_.esp, 100, true);
+
+  /*set the excuting file of the process to deny_write*/
+  sema_down(&sema_filesys);
+  struct file *f = filesys_open(prog_name);
+  file_deny_write(f);
+  sema_up(&sema_filesys);
+  thread_current()->exec_file = f;
+
+  /*free the memory*/
+  palloc_free_page(cmd_line);
+  palloc_free_page(cmd_line_copy);
+
+  thread_current()->parent->exec_success = success;
+  sema_up(&thread_current()->parent->wait_success);
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -86,8 +177,32 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid) 
 {
+  struct thread *t = thread_current();
+
+  for (struct list_elem *child = list_begin(&t->children); child != list_end(&t->children); 
+          child = list_next(child))
+  {
+    struct child_info *child_i = list_entry(child, struct child_info, elem);
+
+    if (child_i->tid == child_tid){
+      if(child_i->is_alive && !child_i->is_waiting){
+        child_i->is_waiting = true;
+        sema_down(&child_i->semaphore);
+        return child_i->exit_code;
+      }
+      /*child has been terminated*/
+      if(child_i->is_waiting){
+        return -1;
+      }
+      /*the current process is waiting on the child*/
+      else{
+        return child_i->exit_code;
+      }
+    }
+  }
+  /*child_tid is not a child of the current process*/
   return -1;
 }
 
@@ -98,6 +213,42 @@ process_exit (void)
   struct thread *cur = thread_current ();
   uint32_t *pd;
 
+  printf("%s: exit(%d)\n", cur->name, cur->exit_code);
+
+  /*close process's excutable file*/
+  sema_down(&sema_filesys);
+  file_close(cur->exec_file);
+  sema_up(&sema_filesys);
+
+  struct child_info *child_i;
+  /*As a parent, tell all its children that their parent has exited*/
+  for (struct list_elem *child = list_begin(&cur->children); child != list_end(&cur->children); 
+          child = list_next(child))
+  {
+    child_i = list_entry(child, struct child_info, elem);
+    if(child_i->is_alive){
+      child_i->t->parent = NULL;
+    }
+    /*if child has exited, free its child_info*/
+    // else if(child_i->tid != cur->tid){
+    //   free(child_i);
+    // }
+  }
+
+  /*as a child, free child_info if its parent has exited.
+    else, update its child_info
+  */
+ if(cur->parent==NULL){
+  free(cur->child_entry);
+ }
+ else{
+  cur->child_entry->exit_code = cur->exit_code;
+  if(cur->child_entry->is_waiting){
+    sema_up(&cur->child_entry->semaphore);
+  }
+  cur->child_entry->is_alive = false;
+  cur->child_entry->t = NULL;
+ }
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
   pd = cur->pagedir;
@@ -114,6 +265,7 @@ process_exit (void)
       pagedir_activate (NULL);
       pagedir_destroy (pd);
     }
+  
 }
 
 /* Sets up the CPU for running user code in the current
@@ -131,6 +283,9 @@ process_activate (void)
      interrupts. */
   tss_update ();
 }
+
+
+
 
 /* We load ELF binaries.  The following definitions are taken
    from the ELF specification, [ELF1], more-or-less verbatim.  */
@@ -216,6 +371,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
   int i;
 
   /* Allocate and activate page directory. */
+  t->exit_code = 0;
   t->pagedir = pagedir_create ();
   if (t->pagedir == NULL) 
     goto done;

@@ -5,6 +5,9 @@
 #include <list.h>
 #include <stdint.h>
 #include <threads/fixed_point.h>
+#include <threads/synch.h>
+#include <filesys/filesys.h>
+#include <filesys/file.h>
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -87,6 +90,11 @@ struct thread
     tid_t tid;                          /* Thread identifier. */
     enum thread_status status;          /* Thread state. */
     char name[16];                      /* Name (for debugging purposes). */
+
+    int exit_code;                      /* for userprog ,may be moved to USERPROG*/
+    struct semaphore wait_success;      /* for userprog, wait for start_process*/
+    bool exec_success;                  /* for userprog, true if child process excute successfully.*/
+
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
@@ -105,6 +113,16 @@ struct thread
     fixed_point load_avg;
     int nice;
 
+    /*for userprog waiting*/
+    struct list children;              /*list of children process*/
+    struct thread *parent;          /*parent of the thread, initially NULL*/
+    struct child_info *child_entry;  /*entry of child_info itself*/
+
+    /*process open file*/
+    struct list file_list;             /*FIles opened by the thread. Member type is file_info*/
+    int next_fd;                       /*Next file descriptor to be allocated.*/
+    struct file *exec_file;            /*The file that the thread is excuting*/
+
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
@@ -113,6 +131,28 @@ struct thread
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };
+
+/*struct to record the info of child
+*/
+struct child_info
+{
+   tid_t tid;                       /*child's thread id*/
+   struct thread *t;                /*child's entry struct*/
+   int exit_code;                   /*child's exit status*/
+   bool is_alive;                   /*is child thread alive*/
+   bool is_waiting;                 /*true if parent is wating on this child*/
+   struct semaphore semaphore;      /*sema for waiting on a child*/
+   struct list_elem elem;           /*element of child list*/
+};
+
+/* struct of a opened file */
+struct file_info
+{
+   int fd;                          /*file descriptor*/
+   struct file *file;               /*Pointer to file*/
+   struct list_elem elem;
+};
+
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
